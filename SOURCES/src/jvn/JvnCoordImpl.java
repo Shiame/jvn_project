@@ -1,221 +1,151 @@
-/***
- * JAVANAISE Implementation
- * JvnServerImpl class
- * Contact:  
- *
- * Authors: 
- */
-
 package jvn;
 
+import java.io.Serializable;
 import java.rmi.server.UnicastRemoteObject;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Map;
 import java.util.Set;
-import java.io.Serializable;
 
+public class JvnCoordImpl extends UnicastRemoteObject implements JvnRemoteCoord {
+    private static final long serialVersionUID = 1L;
+    private int nextObjectId = 0;
+    private final Map<String, ObjectInfo> objectsByName = new HashMap<>();
+    private final Map<Integer, ObjectInfo> objectsById = new HashMap<>();
 
-public class JvnCoordImpl 	
-              extends UnicastRemoteObject 
-							implements JvnRemoteCoord{
-	
+    private static class ObjectInfo {
+        final int objectId;
+        final JvnObject object;
+        Serializable state;
+        JvnRemoteServer writer;
+        final Set<JvnRemoteServer> readers = new HashSet<>();
+        boolean transitionInProgress;
 
-  /**
-	 * 
-	 */
-	private static final long serialVersionUID = 1L;
-  private int nextObjectId = 0;
+        ObjectInfo(int objectId, JvnObject object, Serializable state) {
+            this.objectId = objectId;
+            this.object = object;
+            this.state = state;
+        }
+    }
 
-  private Map<String, ObjectInfo> objectsByName = new HashMap<>();
-  private Map<Integer, ObjectInfo> objectsById = new HashMap<>();
-  private static  class ObjectInfo {
-    int objectId;
-    JvnObject object;
-    Serializable state;
-    JvnRemoteServer writer;
-    Set<JvnRemoteServer> readers = new HashSet<>();
+    public static JvnCoordImpl create() throws Exception { return new JvnCoordImpl(); }
+    private JvnCoordImpl() throws Exception { super(); }
 
-    ObjectInfo(
-      int objectId,
-      JvnObject object,
-      Serializable state
-    ) {
-      this.objectId = objectId;
-      this.object = object;
-      this.state = state;
-    } 
-  
-    
-  }
-  public static JvnCoordImpl create()
-        throws Exception {
+    public synchronized int jvnGetObjectId() throws java.rmi.RemoteException, JvnException {
+        return nextObjectId++;
+    }
 
-    return new JvnCoordImpl();
+    public synchronized void jvnRegisterObject(String name, JvnObject jo, JvnRemoteServer js)
+            throws java.rmi.RemoteException, JvnException {
+        if (name == null || jo == null || js == null)
+            throw new JvnException("cannot register a null object, name or server");
+        if (objectsByName.containsKey(name))
+            throw new JvnException("an object named " + name + " already exists");
+        int id = jo.jvnGetObjectId();
+        ObjectInfo info = new ObjectInfo(id, jo, jo.jvnGetObjectState());
+        info.writer = js;
+        objectsByName.put(name, info);
+        objectsById.put(id, info);
+    }
+
+    public synchronized JvnObject jvnLookupObject(String name, JvnRemoteServer js)
+            throws java.rmi.RemoteException, JvnException {
+        if (name == null) throw new JvnException("Object name cannot be null");
+        ObjectInfo info = objectsByName.get(name);
+        if (info == null) return null;
+        return new JvnObjectImpl(info.state, info.objectId, JvnObjectImpl.NL, null);
+    }
+
+    public Serializable jvnLockRead(int id, JvnRemoteServer js)
+            throws java.rmi.RemoteException, JvnException {
+        ObjectInfo info;
+        JvnRemoteServer oldWriter;
+        synchronized (this) {
+            info = getInfo(id);
+            waitForTransition(info);
+            if (info.writer == null) {
+                info.readers.add(js);
+                return info.state;
+            }
+            oldWriter = info.writer;
+            info.transitionInProgress = true;
+        }
+        try {
+            Serializable newState = oldWriter.jvnInvalidateWriterForReader(id);
+            synchronized (this) {
+                info.state = newState;
+                info.readers.add(oldWriter);
+                info.readers.add(js);
+                info.writer = null;
+                return info.state;
+            }
+        } finally {
+            synchronized (this) {
+                info.transitionInProgress = false;
+                notifyAll();
+            }
+        }
+    }
+
+    public Serializable jvnLockWrite(int id, JvnRemoteServer js)
+            throws java.rmi.RemoteException, JvnException {
+        if (js == null) throw new JvnException("The server cannot be null");
+        ObjectInfo info;
+        JvnRemoteServer oldWriter;
+        Set<JvnRemoteServer> currentReaders;
+        synchronized (this) {
+            info = getInfo(id);
+            waitForTransition(info);
+            if (js.equals(info.writer)) return info.state;
+            oldWriter = info.writer;
+            currentReaders = new HashSet<>(info.readers);
+            info.transitionInProgress = true;
+        }
+        try {
+            if (oldWriter != null && !oldWriter.equals(js)) {
+                Serializable newState = oldWriter.jvnInvalidateWriter(id);
+                synchronized (this) { info.state = newState; }
+            }
+            for (JvnRemoteServer reader : currentReaders)
+                if (!reader.equals(js)) reader.jvnInvalidateReader(id);
+            synchronized (this) {
+                info.readers.clear();
+                info.writer = js;
+                return info.state;
+            }
+        } finally {
+            synchronized (this) {
+                info.transitionInProgress = false;
+                notifyAll();
+            }
+        }
+    }
+
+    private ObjectInfo getInfo(int id) throws JvnException {
+        ObjectInfo info = objectsById.get(id);
+        if (info == null) throw new JvnException("Unknown object id :" + id);
+        return info;
+    }
+
+    private void waitForTransition(ObjectInfo info) throws JvnException {
+        while (info.transitionInProgress) {
+            try { wait(); }
+            catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw new JvnException("Interrupted while waiting for coordinator");
+            }
+        }
+    }
+
+    public synchronized void jvnTerminate(JvnRemoteServer js)
+            throws java.rmi.RemoteException, JvnException {
+        if (js == null) return;
+        for (ObjectInfo info : objectsById.values()) {
+            if (info.writer != null && info.writer.equals(js)) {
+                info.state = js.jvnInvalidateWriter(info.objectId);
+                info.writer = null;
+            }
+            info.readers.remove(js);
+        }
+    }
 }
-
-/**
-  * Default constructor
-  * @throws JvnException
-  **/
-	private JvnCoordImpl() throws Exception {
-		super();
-	}
-
-  /**
-  *  Allocate a NEW JVN object id (usually allocated to a 
-  *  newly created JVN object)
-  * @throws java.rmi.RemoteException,JvnException
-  **/
-  public synchronized int jvnGetObjectId()
-  throws java.rmi.RemoteException,jvn.JvnException {
-    return nextObjectId++;
-  }
-  
-  /**
-  * Associate a symbolic name with a JVN object
-  * @param jon : the JVN object name
-  * @param jo  : the JVN object 
-  * @param joi : the JVN object identification
-  * @param js  : the remote reference of the JVNServer
-  * @throws java.rmi.RemoteException,JvnException
-  **/
-  public void jvnRegisterObject(String jon, JvnObject jo, JvnRemoteServer js)
-  throws java.rmi.RemoteException,jvn.JvnException{
-  
-    if(jon == null || jo == null || js == null){
-      throw new JvnException( "cannot register a null object, name or server");
-    }
-
-    if (objectsByName.containsKey(jon)) {
-      throw new JvnException("an object named" + jon + "already exists");
-      
-    }
-
-    int objectId = jo.jvnGetObjectId();
-    Serializable state = jo.jvnGetObjectState();
-    ObjectInfo info = new ObjectInfo(objectId, jo, state);
-    info.writer = js;
-    objectsByName.put(jon, info);
-    objectsById.put(objectId, info);
-  }
-  
-  /**
-  * Get the reference of a JVN object managed by a given JVN server 
-  * @param jon : the JVN object name
-  * @param js : the remote reference of the JVNServer
-  * @throws java.rmi.RemoteException,JvnException
-  **/
-  public synchronized JvnObject jvnLookupObject(String jon, JvnRemoteServer js)
-  throws java.rmi.RemoteException,jvn.JvnException{
-    if(jon == null){
-      throw new JvnException("Object name cannot be null");
-    };
-    ObjectInfo info = objectsByName.get(jon);
-
-    if (info == null) {
-        return null;
-    }
-
-    return new JvnObjectImpl(
-        info.state,
-        info.objectId,
-        JvnObjectImpl.NL,
-        null
-      );
-  }
-  
-  /**
-  * Get a Read lock on a JVN object managed by a given JVN server 
-  * @param joi : the JVN object identification
-  * @param js  : the remote reference of the server
-  * @return the current JVN object state
-  * @throws java.rmi.RemoteException, JvnException
-  **/
-   public synchronized Serializable jvnLockRead(int joi, JvnRemoteServer js)
-   throws java.rmi.RemoteException, JvnException{
-    ObjectInfo info = objectsById.get(joi);
-    if(info == null) {
-      throw new JvnException("Unknown object id :" + joi);
-    }
-    // Aucun écrivain : plusieurs lecteurs sont autorisés
-    if(info.writer == null) {
-      info.readers.add(js);
-      return info.state;
-    }
-    // Un écrivain existe : il doit devenir lecteur
-    JvnRemoteServer oldWriter = info.writer;
-
-    Serializable newState = oldWriter.jvnInvalidateWriterForReader(joi);
-    info.state = newState;
-     // L'ancien écrivain devient lecteur
-    info.readers.add(oldWriter);
-     // Le nouveau client devient aussi lecteur
-    info.readers.add(js);
-    // Il n'y a plus d'écrivain
-    info.writer = null;
-    return info.state;
-   }
-
-  /**
-  * Get a Write lock on a JVN object managed by a given JVN server 
-  * @param joi : the JVN object identification
-  * @param js  : the remote reference of the server
-  * @return the current JVN object state
-  * @throws java.rmi.RemoteException, JvnException
-  **/
-   public synchronized Serializable jvnLockWrite(int joi, JvnRemoteServer js)
-   throws java.rmi.RemoteException, JvnException{
-    ObjectInfo info = objectsById.get(joi);
-    if(info == null) {
-      throw new JvnException("Unknown object id :" + joi);
-    }
-
-    if (js == null) {
-      throw new JvnException("The server cannot be null");
-      
-    }
-
-    if(info.writer != null && !info.writer.equals(js)) {
-      Serializable newState = info.writer.jvnInvalidateWriter(joi);
-      info.state = newState;
-      info.writer=null;
-    }
-
-    Set<JvnRemoteServer> currentReaders = new HashSet<>(info.readers);
-    for(JvnRemoteServer reader : currentReaders){
-      if(!reader.equals(js)){
-        reader.jvnInvalidateReader(joi);
-      }
-    }
-    info.readers.clear();
-    info.writer = js;
-
-    return info.state;
-
-   }
-
-	/**
-	* A JVN server terminates
-	* @param js  : the remote reference of the server
-	* @throws java.rmi.RemoteException, JvnException
-	**/
-    public void jvnTerminate(JvnRemoteServer js)
-	 throws java.rmi.RemoteException, JvnException {
-
-    if (js == null) {
-      return;
-    }
-    for (ObjectInfo info : objectsById.values()) {
-      if(info.writer != null && info.writer.equals(js)) {
-        Serializable newState = js.jvnInvalidateWriter(info.objectId);
-        info.state=newState;
-        info.writer=null;
-      }
-      info.readers.remove(js);
-    }
-    
-  }
-}
-
- 
