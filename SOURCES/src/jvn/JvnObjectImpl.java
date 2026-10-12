@@ -1,7 +1,6 @@
 package jvn;
 
 import java.io.Serializable;
-import java.net.ResponseCache;
 
 public class JvnObjectImpl implements JvnObject {
 
@@ -52,18 +51,37 @@ public class JvnObjectImpl implements JvnObject {
                     "cannot acquire read lock in state " + lockState
                 );
             }
-
-        }
-        Serializable newState = server.jvnLockRead(objectId);
-        synchronized (this){
-            objectState = newState;
             lockState = R;
-        }
 
+        }
+        /* Serializable newState = server.jvnLockRead(objectId);
+                synchronized (this){
+                    objectState = newState;
+                    lockState = R;
+                }
+                
+        */
+        try {
+            Serializable newState =
+                server.jvnLockRead(objectId);
+
+            synchronized (this) {
+                objectState = newState;
+                lockState = R;
+            }
+
+        } catch (JvnException e) {
+            synchronized (this) {
+                lockState = NL;
+            }
+
+            throw e;
+        }
     }
 
     @Override 
     public void jvnLockWrite() throws JvnException {
+        int previousState;
         synchronized(this) {
             if (lockState == WC) {
                 lockState = W;
@@ -78,12 +96,32 @@ public class JvnObjectImpl implements JvnObject {
                     "cannot acquire read lock in state " + lockState
                 );
             }
+            previousState = lockState;
         }
-        Serializable newState = server.jvnLockWrite(objectId);
+      /*   Serializable newState = server.jvnLockWrite(objectId);
         synchronized(this){
             objectState = newState;
             lockState = W;
-        }
+        } */
+
+            try {
+                Serializable newState =
+                    server.jvnLockWrite(objectId);
+
+                synchronized (this) {
+                    objectState = newState;
+                    lockState = W;
+                }
+
+            } catch (JvnException e) {
+                synchronized (this) {
+                    // An invalidation may have changed RC into NL while the
+                    // request was in progress. Do not restore a stale cache.
+                    if (lockState != NL) lockState = previousState;
+                }
+
+                throw e;
+            }
 
     }
 
@@ -123,7 +161,9 @@ public class JvnObjectImpl implements JvnObject {
     @Override 
     public synchronized void jvnInvalidateReader()throws JvnException { 
         try {
-            while (lockState == R) {
+            while (
+                lockState == R
+            ) {
                 wait();
             }
         } catch (InterruptedException e) {
@@ -149,10 +189,12 @@ public class JvnObjectImpl implements JvnObject {
     @Override 
     public synchronized Serializable jvnInvalidateWriter() throws JvnException{
         try {
-            while (lockState == W || lockState == RWC ) {
+            while (
+                lockState == W
+                || lockState == RWC
+            ) {
                 wait();
             }
-            
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             throw new JvnException(
@@ -166,9 +208,15 @@ public class JvnObjectImpl implements JvnObject {
             return currentState; 
         }
         if (lockState == NL) {
-            throw new JvnException(
-                "No write look to invalidate"
-            );
+            // The coordinator may repeat an invalidation after a concurrent
+            // transition. The local write is already gone.
+            return objectState;
+        }
+        if (lockState == RC) {
+            // The writer was already reduced to a cached reader.
+            Serializable currentState = objectState;
+            lockState = NL;
+            return currentState;
         }
         throw new JvnException("Cannot invalidate writer in state " + lockState);
 
@@ -177,7 +225,10 @@ public class JvnObjectImpl implements JvnObject {
     @Override 
     public synchronized Serializable jvnInvalidateWriterForReader() throws JvnException{
         try {
-            while (lockState == W || lockState == RWC) {
+            while (
+                lockState == W
+                || lockState == RWC
+            ) {
                 wait();
             }
             
@@ -194,9 +245,11 @@ public class JvnObjectImpl implements JvnObject {
             
         }
         if (lockState == NL) {
-            throw new JvnException(
-                "No write lock to reduce to reader"
-            );
+            lockState = RC;
+            return objectState;
+        }
+        if (lockState == RC) {
+            return objectState;
         }
 
         throw new JvnException("Cannot invalidate writer in state " + lockState);
