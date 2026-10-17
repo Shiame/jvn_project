@@ -146,7 +146,16 @@ jamais `JvnObject` ni les verrous directement.
 java -cp /tmp/jvn jvn.JvnCoordLauncher
 ```
 
-3. Dans un autre terminal, lancer cinq clients concurrents :
+3. Dans un autre terminal, initialiser une seule fois l'objet partage :
+
+```bash
+java -cp /tmp/jvn burst.CrashWriterClient "initialisation"
+```
+
+Laisser ce terminal ouvert pendant le test. Ce client cree l'objet `IRC` et
+reste disponible pour repondre aux invalidations RMI.
+
+4. Dans un troisieme terminal, lancer cinq clients concurrents :
 
 ```bash
 for i in 1 2 3 4 5
@@ -157,8 +166,7 @@ wait
 ```
 
 Chaque client doit finir avec `reads=500`, `writes=500` et `errors=0`.
-L'objet partage `IRC` est cree automatiquement par le premier proxy qui le
-demande. Le coordinateur, lui, doit etre demarre auparavant.
+Le coordinateur doit etre demarre avant tous les clients.
 
 ## Sequence principale
 
