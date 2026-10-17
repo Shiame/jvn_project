@@ -1,6 +1,7 @@
 package jvn;
 
 import java.io.Serializable;
+import java.rmi.RemoteException;
 import java.rmi.server.UnicastRemoteObject;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -71,7 +72,16 @@ public class JvnCoordImpl extends UnicastRemoteObject implements JvnRemoteCoord 
             info.transitionInProgress = true;
         }
         try {
-            Serializable newState = oldWriter.jvnInvalidateWriterForReader(id);
+            Serializable newState;
+            try {
+                newState = oldWriter.jvnInvalidateWriterForReader(id);
+            } catch (RemoteException e) {
+                synchronized (this) {
+                    removeFailedClient(info, oldWriter);
+                    info.readers.add(js);
+                    return info.state;
+                }
+            }
             synchronized (this) {
                 info.state = newState;
                 info.readers.add(oldWriter);
@@ -103,11 +113,25 @@ public class JvnCoordImpl extends UnicastRemoteObject implements JvnRemoteCoord 
         }
         try {
             if (oldWriter != null && !oldWriter.equals(js)) {
-                Serializable newState = oldWriter.jvnInvalidateWriter(id);
-                synchronized (this) { info.state = newState; }
+                try {
+                    Serializable newState = oldWriter.jvnInvalidateWriter(id);
+                    synchronized (this) { info.state = newState; }
+                } catch (RemoteException e) {
+                    synchronized (this) {
+                        removeFailedClient(info, oldWriter);
+                    }
+                }
             }
-            for (JvnRemoteServer reader : currentReaders)
-                if (!reader.equals(js)) reader.jvnInvalidateReader(id);
+            for (JvnRemoteServer reader : currentReaders) {
+                if (reader.equals(js)) continue;
+                try {
+                    reader.jvnInvalidateReader(id);
+                } catch (RemoteException e) {
+                    synchronized (this) {
+                        removeFailedClient(info, reader);
+                    }
+                }
+            }
             synchronized (this) {
                 info.readers.clear();
                 info.writer = js;
@@ -119,6 +143,16 @@ public class JvnCoordImpl extends UnicastRemoteObject implements JvnRemoteCoord 
                 notifyAll();
             }
         }
+    }
+
+    /**
+     * A failed RMI callback means that the client is no longer usable for this
+     * object. The coordinator keeps its latest known state and forgets it.
+     */
+    private void removeFailedClient(ObjectInfo info, JvnRemoteServer client) {
+        info.readers.remove(client);
+        if (client.equals(info.writer)) info.writer = null;
+        System.err.println("JVN: client unreachable for object " + info.objectId);
     }
 
     private ObjectInfo getInfo(int id) throws JvnException {
