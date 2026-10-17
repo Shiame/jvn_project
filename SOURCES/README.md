@@ -168,6 +168,65 @@ wait
 Chaque client doit finir avec `reads=500`, `writes=500` et `errors=0`.
 Le coordinateur doit etre demarre avant tous les clients.
 
+## Echecs observes et corrections apres le burst test
+
+Le burst test lance plusieurs JVM qui demandent des verrous incompatibles au
+meme moment. Avant les corrections, ce test pouvait afficher des erreurs comme
+`Cannot invalidate writer in state 1`, `Cannot invalidate reader in state 4`,
+ou rester bloque pendant une invalidation.
+
+### 1. Deadlock pendant un callback RMI
+
+Cause : le coordinateur gardait son moniteur Java pendant un appel distant,
+par exemple `jvnInvalidateWriter()`. Le client appele pouvait attendre un
+verrou local, tandis qu'un autre appel attendait le coordinateur. Aucun des
+deux ne pouvait progresser.
+
+Correction dans `JvnCoordImpl` : le coordinateur memorise qu'une transition
+est en cours avec `transitionInProgress`, libere son moniteur, execute le
+callback RMI, puis reprend son moniteur seulement pour mettre a jour
+`state`, `writer` et `readers`. Les autres demandes attendent la fin de cette
+transition avec `waitForTransition()`.
+
+### 2. Course entre une demande de verrou et une invalidation
+
+Cause : un client en cache `RC` pouvait demander un write lock pendant qu'un
+autre client lui envoyait une invalidation. Si le client passait trop tot en
+etat `W`, l'invalidation recevait un etat incoherent et echouait.
+
+Correction dans `JvnObjectImpl.jvnLockWrite()` : depuis `NL` ou `RC`, le client
+garde son ancien etat pendant l'appel distant. Il passe a `W` seulement apres
+l'accord du coordinateur. Si une invalidation a deja transforme `RC` en `NL`,
+la gestion d'erreur ne restaure pas un ancien cache devenu invalide.
+
+### 3. Invalidation recue alors que le verrou est encore utilise
+
+Cause : un callback d'invalidation peut arriver alors que l'application est
+encore dans `read()` ou `write()`. Retirer le verrou immediatement serait
+incorrect.
+
+Correction : `jvnInvalidateReader()`, `jvnInvalidateWriter()` et
+`jvnInvalidateWriterForReader()` attendent avec `wait()` tant que le verrou
+est utilise. `jvnUnLock()` appelle `notifyAll()` lorsqu'une operation termine,
+ce qui permet au callback de reprendre ensuite.
+
+### 4. Callbacks repetes apres une transition concurrente
+
+Cause : deux demandes concurrentes peuvent produire un callback devenu
+redondant. Par exemple, un objet peut deja etre en `NL` lorsqu'une seconde
+invalidation arrive.
+
+Correction : les invalidations tolerent les etats deja invalides ou deja
+reduits, notamment `NL` et `RC`, au lieu de transformer ce cas en erreur. Le
+coordinateur peut alors achever sa transition et attribuer le verrou demande.
+
+### Resultat attendu
+
+Apres ces corrections, les cinq clients du burst test terminent chacun avec
+le bon nombre de lectures et d'ecritures, et surtout `errors=0`. Le test a ete
+verifie avec cinq clients et 200 operations par client : chacun a termine avec
+`reads=100`, `writes=100`, `errors=0`.
+
 ## Sequence principale
 
 ### Creation du premier objet
@@ -293,15 +352,7 @@ Verifier que :
 
 ## Limites de cette version
 
-Cette implementation correspond a JVN1. Le programmeur doit ecrire
-explicitement :
-
-```java
-jvnObject.jvnLockRead();
-Sentence s = (Sentence) jvnObject.jvnGetObjectState();
-s.read();
-jvnObject.jvnUnLock();
-```
-
-La transparence et la generation d'objets d'interception specifiques sont des
-objectifs de JVN2, pas de cette premiere version.
+Le proxy rend l'utilisation des verrous transparente a l'application, mais le
+coordinateur reste unique et en memoire. La panne du coordinateur et la
+persistance de son etat correspondent a l'extension 3. La panne d'un client
+est traitee dans la branche `extension-2-pannes-client`.
