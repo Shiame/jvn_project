@@ -121,6 +121,22 @@ public class JvnCoordImpl extends UnicastRemoteObject implements JvnRemoteCoord 
         }
     }
 
+    public synchronized void jvnFlushObject(
+            int id,
+            Serializable state,
+            JvnRemoteServer js)
+            throws java.rmi.RemoteException, JvnException {
+        if (js == null) throw new JvnException("The server cannot be null");
+        ObjectInfo info = getInfo(id);
+        waitForTransition(info);
+
+        if (js.equals(info.writer)) {
+            info.state = state;
+            info.writer = null;
+        }
+        info.readers.remove(js);
+    }
+
     private ObjectInfo getInfo(int id) throws JvnException {
         ObjectInfo info = objectsById.get(id);
         if (info == null) throw new JvnException("Unknown object id :" + id);

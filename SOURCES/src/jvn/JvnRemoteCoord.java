@@ -66,6 +66,13 @@ public interface JvnRemoteCoord extends Remote {
 	 throws java.rmi.RemoteException, JvnException;
 
 	/**
+	* Release a cached object held by a client. A released writer supplies the
+	* state that becomes authoritative at the coordinator.
+	**/
+   public void jvnFlushObject(int joi, Serializable state, JvnRemoteServer js)
+	 throws java.rmi.RemoteException, JvnException;
+
+	/**
 	* A JVN server terminates
 	* @param js  : the remote reference of the server
 	* @throws java.rmi.RemoteException, JvnException

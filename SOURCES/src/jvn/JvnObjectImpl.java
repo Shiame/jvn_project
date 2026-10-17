@@ -18,6 +18,9 @@ public class JvnObjectImpl implements JvnObject {
     private int objectId;
     private int lockState;
     private transient JvnLocalServer server;
+    private boolean flushInProgress;
+    private boolean flushed;
+    private int proxyUses;
 
     public JvnObjectImpl(
                 Serializable objectState,
@@ -37,7 +40,9 @@ public class JvnObjectImpl implements JvnObject {
 
     @Override 
     public void jvnLockRead()  throws JvnException {
+        touchCache();
         synchronized(this) {
+            waitForFlushCompletion();
             if(lockState == RC ){
                 lockState = R;
                 return; 
@@ -81,8 +86,10 @@ public class JvnObjectImpl implements JvnObject {
 
     @Override 
     public void jvnLockWrite() throws JvnException {
+        touchCache();
         int previousState;
         synchronized(this) {
+            waitForFlushCompletion();
             if (lockState == WC) {
                 lockState = W;
                 return;  
@@ -162,7 +169,7 @@ public class JvnObjectImpl implements JvnObject {
     public synchronized void jvnInvalidateReader()throws JvnException { 
         try {
             while (
-                lockState == R
+                flushInProgress || lockState == R
             ) {
                 wait();
             }
@@ -190,7 +197,7 @@ public class JvnObjectImpl implements JvnObject {
     public synchronized Serializable jvnInvalidateWriter() throws JvnException{
         try {
             while (
-                lockState == W
+                flushInProgress || lockState == W
                 || lockState == RWC
             ) {
                 wait();
@@ -226,7 +233,7 @@ public class JvnObjectImpl implements JvnObject {
     public synchronized Serializable jvnInvalidateWriterForReader() throws JvnException{
         try {
             while (
-                lockState == W
+                flushInProgress || lockState == W
                 || lockState == RWC
             ) {
                 wait();
@@ -254,6 +261,54 @@ public class JvnObjectImpl implements JvnObject {
 
         throw new JvnException("Cannot invalidate writer in state " + lockState);
 
+    }
+
+    synchronized Serializable jvnBeginFlush() throws JvnException {
+        if (flushInProgress || proxyUses > 0
+                || lockState == R || lockState == W || lockState == RWC) {
+            throw new JvnException("Object " + objectId + " is currently in use");
+        }
+        flushInProgress = true;
+        return objectState;
+    }
+
+    synchronized void jvnCompleteFlush() {
+        lockState = NL;
+        flushed = true;
+        flushInProgress = false;
+        notifyAll();
+    }
+
+    synchronized void jvnAbortFlush() {
+        flushInProgress = false;
+        notifyAll();
+    }
+
+    synchronized boolean jvnTryUseFromProxy() throws JvnException {
+        waitForFlushCompletion();
+        if (flushed) return false;
+        proxyUses++;
+        return true;
+    }
+
+    synchronized void jvnEndUseFromProxy() {
+        proxyUses--;
+        notifyAll();
+    }
+
+    private void touchCache() {
+        if (server instanceof JvnServerImpl) {
+            ((JvnServerImpl) server).jvnTouchObject(objectId);
+        }
+    }
+
+    private void waitForFlushCompletion() throws JvnException {
+        try {
+            while (flushInProgress) wait();
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new JvnException("Interrupted while waiting for cache flush");
+        }
     }
 
 

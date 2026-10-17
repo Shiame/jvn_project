@@ -8,9 +8,11 @@ import java.lang.reflect.Proxy;
 
 public class JvnProxy implements InvocationHandler {
 
-    private final JvnObject object;
+    private final String name;
+    private volatile JvnObject object;
 
-    private JvnProxy(JvnObject object) {
+    private JvnProxy(String name, JvnObject object) {
+        this.name = name;
         this.object = object;
     }
 
@@ -43,7 +45,7 @@ public class JvnProxy implements InvocationHandler {
         return Proxy.newProxyInstance(
                 initialState.getClass().getClassLoader(),
                 interfaces,
-                new JvnProxy(jo)
+                new JvnProxy(name, jo)
         );
     }
 
@@ -72,19 +74,45 @@ public class JvnProxy implements InvocationHandler {
             );
         }
 
-        if (write) {
-            object.jvnLockWrite();
-        } else {
-            object.jvnLockRead();
-        }
+        JvnObject target = acquireObjectForInvocation();
+        boolean locked = false;
 
         try {
-            Object state = object.jvnGetObjectState();
+            if (write) {
+                target.jvnLockWrite();
+            } else {
+                target.jvnLockRead();
+            }
+            locked = true;
+            Object state = target.jvnGetObjectState();
             return method.invoke(state, args);
         } catch (InvocationTargetException e) {
             throw e.getCause();
         } finally {
-            object.jvnUnLock();
+            if (locked) target.jvnUnLock();
+            releaseObjectAfterInvocation(target);
+        }
+    }
+
+    private JvnObject acquireObjectForInvocation() throws JvnException {
+        while (true) {
+            JvnServerImpl server = JvnServerImpl.jvnGetServer();
+            if (server == null) throw new JvnException("Cannot initialize JVN server");
+
+            JvnObject current = server.jvnLookupObject(name);
+            if (current == null) throw new JvnException("Unknown shared object: " + name);
+            object = current;
+
+            if (!(current instanceof JvnObjectImpl)
+                    || ((JvnObjectImpl) current).jvnTryUseFromProxy()) {
+                return current;
+            }
+        }
+    }
+
+    private void releaseObjectAfterInvocation(JvnObject target) {
+        if (target instanceof JvnObjectImpl) {
+            ((JvnObjectImpl) target).jvnEndUseFromProxy();
         }
     }
 

@@ -3,7 +3,8 @@ package jvn;
 import java.io.Serializable;
 import java.rmi.Naming;
 import java.rmi.server.UnicastRemoteObject;
-import java.util.HashMap;
+import java.util.Iterator;
+import java.util.LinkedHashMap;
 import java.util.Map;
 
 public class JvnServerImpl
@@ -11,6 +12,7 @@ public class JvnServerImpl
         implements JvnLocalServer, JvnRemoteServer {
 
     private static final long serialVersionUID = 1L;
+    private static final String CACHE_SIZE_PROPERTY = "jvn.cache.max.objects";
 
     // Singleton
     private static JvnServerImpl js = null;
@@ -23,6 +25,7 @@ public class JvnServerImpl
 
     // Objects associated with symbolic names
     private Map<String, JvnObject> namedObjects;
+    private final int maxCacheObjects;
 
 
     /**
@@ -31,8 +34,9 @@ public class JvnServerImpl
     private JvnServerImpl() throws Exception {
         super();
 
-        objects = new HashMap<>();
-        namedObjects = new HashMap<>();
+        objects = new LinkedHashMap<>(16, 0.75f, true);
+        namedObjects = new LinkedHashMap<>();
+        maxCacheObjects = readCacheCapacity();
 
         // Connection to the JVN coordinator
         coord = (JvnRemoteCoord)
@@ -83,6 +87,7 @@ public class JvnServerImpl
 
             // Store the object locally
             objects.put(objectId, jo);
+            enforceCacheCapacity(objectId);
 
             return jo;
 
@@ -139,6 +144,7 @@ public class JvnServerImpl
             JvnObject jo = namedObjects.get(jon);
 
             if (jo != null) {
+                objects.get(jo.jvnGetObjectId());
                 return jo;
             }
 
@@ -156,6 +162,7 @@ public class JvnServerImpl
                         jo.jvnGetObjectId(),
                         jo
                 );
+                enforceCacheCapacity(jo.jvnGetObjectId());
             }
             if (jo instanceof JvnObjectImpl) {
                 ((JvnObjectImpl) jo).setServer(this);
@@ -241,6 +248,80 @@ public class JvnServerImpl
                     "Error terminating JVN server: "
                     + e.getMessage()
             );
+        }
+    }
+
+    /** Flush every cached object which is not currently used by the application. */
+    public synchronized int jvnFlushCache() throws JvnException {
+        int flushed = 0;
+        Iterator<Map.Entry<Integer, JvnObject>> iterator = objects.entrySet().iterator();
+        while (iterator.hasNext()) {
+            Map.Entry<Integer, JvnObject> entry = iterator.next();
+            if (flushObject(entry.getKey(), entry.getValue(), iterator)) {
+                flushed++;
+            }
+        }
+        return flushed;
+    }
+
+    public synchronized int jvnGetCacheSize() {
+        return objects.size();
+    }
+
+    synchronized void jvnTouchObject(int objectId) {
+        objects.get(objectId);
+    }
+
+    private void enforceCacheCapacity(int protectedObjectId) throws JvnException {
+        while (objects.size() > maxCacheObjects) {
+            boolean flushed = false;
+            Iterator<Map.Entry<Integer, JvnObject>> iterator = objects.entrySet().iterator();
+            while (iterator.hasNext()) {
+                Map.Entry<Integer, JvnObject> entry = iterator.next();
+                if (entry.getKey() == protectedObjectId) continue;
+                if (flushObject(entry.getKey(), entry.getValue(), iterator)) {
+                    flushed = true;
+                    break;
+                }
+            }
+            if (!flushed) return;
+        }
+    }
+
+    private boolean flushObject(
+            int objectId,
+            JvnObject object,
+            Iterator<Map.Entry<Integer, JvnObject>> iterator)
+            throws JvnException {
+        if (!(object instanceof JvnObjectImpl)) return false;
+
+        JvnObjectImpl implementation = (JvnObjectImpl) object;
+        Serializable state;
+        try {
+            state = implementation.jvnBeginFlush();
+        } catch (JvnException e) {
+            return false;
+        }
+
+        try {
+            coord.jvnFlushObject(objectId, state, this);
+            implementation.jvnCompleteFlush();
+            iterator.remove();
+            namedObjects.entrySet().removeIf(entry -> entry.getValue() == object);
+            return true;
+        } catch (Exception e) {
+            implementation.jvnAbortFlush();
+            throw new JvnException("Error flushing cached object: " + e.getMessage());
+        }
+    }
+
+    private int readCacheCapacity() {
+        String configuredValue = System.getProperty(CACHE_SIZE_PROPERTY);
+        if (configuredValue == null) return 32;
+        try {
+            return Math.max(1, Integer.parseInt(configuredValue));
+        } catch (NumberFormatException e) {
+            return 32;
         }
     }
 
