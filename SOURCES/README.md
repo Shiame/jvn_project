@@ -1,9 +1,9 @@
-# Projet Javanaise - JVN1
+# Projet Javanaise - JVN2 avec correction du burst test
 
 Ce projet implemente un cache d'objets Java repartis au-dessus de Java RMI.
-La version realisee ici est JVN1 : l'utilisation est non transparente pour le
-programmeur. L'application utilise explicitement `JvnObject`, les verrous et
-`jvnGetObjectState()`.
+La version realisee ici est JVN2 : l'application utilise une interface metier,
+des annotations et un proxy dynamique. Le proxy demande et libere les verrous
+automatiquement.
 
 ## Organisation
 
@@ -14,11 +14,17 @@ src/irc/Irc.java
 src/irc/Sentence.java
     Objet metier partage. Il contient le texte du chat.
 
+src/irc/SentenceItf.java
+    Interface metier annotee avec les operations de lecture et d'ecriture.
+
 src/jvn/JvnObject.java
     Interface de l'objet d'interception.
 
 src/jvn/JvnObjectImpl.java
     Implementation de l'objet d'interception et gestion des verrous locaux.
+
+src/jvn/JvnProxy.java
+    Proxy dynamique qui intercepte read() et write() puis gere les verrous.
 
 src/jvn/JvnServerImpl.java
     Serveur local de chaque JVM cliente.
@@ -34,6 +40,9 @@ Architecture :
 
 ```text
 Irc
+ |
+ v
+JvnProxy
  |
  v
 JvnObjectImpl
@@ -57,7 +66,7 @@ javac -version
 Les commandes suivantes doivent etre executees depuis le dossier `SOURCES` :
 
 ```bash
-cd "/home/chaymae/Documents/ChatGPT/projet javanaise/DONNE-JVN-26-27/DONNE-JVN-26-27/SOURCES"
+cd "/home/chaymae/Documents/ChatGPT/projet javanaise/DONNE-JVN-26-27-JVN2/DONNE-JVN-26-27/SOURCES"
 ```
 
 ## Compilation propre
@@ -68,7 +77,7 @@ Cela evite les erreurs de versions RMI et de `serialVersionUID`.
 ```bash
 rm -rf /tmp/jvn
 mkdir -p /tmp/jvn
-javac -d /tmp/jvn src/jvn/*.java src/irc/*.java
+javac -d /tmp/jvn src/jvn/*.java src/irc/*.java src/burst/*.java
 ```
 
 Si la commande termine sans message d'erreur, la compilation est correcte.
@@ -124,6 +133,32 @@ distinctes. Elles doivent partager l'objet logique nomme `IRC`.
 
 Le texte ne s'affiche pas automatiquement dans les autres fenetres. Un client
 doit cliquer sur `read` pour demander la version actuelle de l'objet.
+
+## Burst test JVN2
+
+Le test `BurstProxyClient` utilise le proxy dynamique de JVN2. Il ne manipule
+jamais `JvnObject` ni les verrous directement.
+
+1. Compiler le projet avec la commande ci-dessus.
+2. Demarrer le coordinateur :
+
+```bash
+java -cp /tmp/jvn jvn.JvnCoordLauncher
+```
+
+3. Dans un autre terminal, lancer cinq clients concurrents :
+
+```bash
+for i in 1 2 3 4 5
+do
+    java -cp /tmp/jvn burst.BurstProxyClient "$i" 1000 &
+done
+wait
+```
+
+Chaque client doit finir avec `reads=500`, `writes=500` et `errors=0`.
+L'objet partage `IRC` est cree automatiquement par le premier proxy qui le
+demande. Le coordinateur, lui, doit etre demarre auparavant.
 
 ## Sequence principale
 
