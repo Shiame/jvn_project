@@ -1,4 +1,4 @@
-# Projet Javanaise - JVN1 OUESLATI&BOUAZZA
+# Projet Javanaise - JVN1 OUESLATI&BOUAZZA groupe 10
 
 Ce projet implemente un cache d'objets Java repartis au-dessus de Java RMI.
 La version realisee ici est JVN1 : l'utilisation est non transparente pour le
